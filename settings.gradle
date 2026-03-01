@@ -11,6 +11,3 @@ pluginManagement {
 }
 
 rootProject.name = 'dust-serve-kotlin'
-
-include ':dust-core-kotlin'
-project(':dust-core-kotlin').projectDir = file('../dust-core-kotlin')
