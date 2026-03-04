@@ -47,6 +47,10 @@ class WorkManagerDownloadCoordinator(
 ) {
     private val activeWorkIds = ConcurrentHashMap<String, UUID>()
 
+    companion object {
+        const val COMMON_TAG = "dust-serve-download"
+    }
+
     fun download(descriptor: ModelDescriptor) {
         val url = descriptor.url
         if (url.isNullOrBlank()) {
@@ -95,6 +99,7 @@ class WorkManagerDownloadCoordinator(
                 ),
             )
             .addTag(descriptor.id)
+            .addTag(COMMON_TAG)
             .build()
 
         if (activeWorkIds.putIfAbsent(descriptor.id, request.id) != null) {
@@ -107,7 +112,7 @@ class WorkManagerDownloadCoordinator(
             mapOf("modelId" to descriptor.id, "sizeBytes" to descriptor.sizeBytes),
         )
 
-        workManager.enqueueUniqueWork(descriptor.id, ExistingWorkPolicy.REPLACE, request)
+        workManager.enqueueUniqueWork(descriptor.id, ExistingWorkPolicy.KEEP, request)
         observeWork(descriptor = descriptor, workId = request.id)
     }
 
@@ -188,6 +193,35 @@ class WorkManagerDownloadCoordinator(
                 }
             }
         }
+    }
+
+    fun isActive(modelId: String): Boolean = activeWorkIds.containsKey(modelId)
+
+    fun reconnectActiveDownloads(
+        descriptorProvider: (String) -> ModelDescriptor?,
+    ): Set<String> {
+        val activeIds = mutableSetOf<String>()
+        val workInfos = try {
+            workManager.getWorkInfosByTag(COMMON_TAG).get()
+        } catch (_: Exception) {
+            return activeIds
+        }
+
+        for (workInfo in workInfos) {
+            if (workInfo.state != WorkInfo.State.RUNNING && workInfo.state != WorkInfo.State.ENQUEUED) {
+                continue
+            }
+            val modelId = workInfo.tags.firstOrNull { it != COMMON_TAG && it != "ModelDownloadWorker" }
+                ?: continue
+            if (activeWorkIds.putIfAbsent(modelId, workInfo.id) != null) {
+                continue
+            }
+            activeIds.add(modelId)
+            val descriptor = descriptorProvider(modelId) ?: continue
+            stateStore.setStatus(descriptor.id, ModelStatus.Downloading(0f))
+            observeWork(descriptor = descriptor, workId = workInfo.id)
+        }
+        return activeIds
     }
 
     private fun failImmediately(

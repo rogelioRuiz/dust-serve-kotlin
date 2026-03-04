@@ -273,11 +273,14 @@ class DownloadManager(
         }
     }
 
-    fun cleanupStalePartFiles() {
+    fun cleanupStalePartFiles(activeModelIds: Set<String> = emptySet()) {
         val modelsDir = File(baseDir, "models")
         val modelDirs = modelsDir.listFiles()?.filter { it.isDirectory } ?: return
 
         for (modelDir in modelDirs) {
+            val modelId = modelDir.name
+            if (modelId in activeModelIds) continue
+
             val partFiles = modelDir.listFiles()?.filter { it.isFile && it.extension == "part" } ?: continue
             if (partFiles.isEmpty()) {
                 continue
@@ -287,7 +290,6 @@ class DownloadManager(
                 partFile.delete()
             }
 
-            val modelId = modelDir.name
             val finalFile = File(modelDir, "$modelId.bin")
             if (!finalFile.exists()) {
                 stateStore.setStatus(modelId, ModelStatus.NotLoaded)

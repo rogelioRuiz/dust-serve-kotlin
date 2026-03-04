@@ -17,8 +17,11 @@
 package io.t6x.dust.serve
 
 import android.content.Context
+import android.content.pm.ServiceInfo
+import android.os.Build
 import androidx.work.CoroutineWorker
 import androidx.work.Data
+import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import io.t6x.dust.core.DustCoreError
@@ -72,6 +75,9 @@ class ModelDownloadWorker(
 
         val partFile = File(modelDir, "$modelId.part")
         val finalFile = File(modelDir, "$modelId.bin")
+
+        DownloadNotificationHelper.ensureChannel(applicationContext)
+        setForeground(makeForegroundInfo(modelId, 0, 0L, sizeBytes))
 
         try {
             var offset = partFile.takeIf { it.exists() }?.length() ?: 0L
@@ -152,6 +158,13 @@ class ModelDownloadWorker(
                                 PROGRESS_BYTES_DOWNLOADED to totalBytesDownloaded,
                                 PROGRESS_TOTAL_BYTES to totalBytes,
                             ))
+
+                            val progressPercent = if (totalBytes > 0L) {
+                                ((totalBytesDownloaded * 100) / totalBytes).toInt().coerceIn(0, 100)
+                            } else {
+                                0
+                            }
+                            setForeground(makeForegroundInfo(modelId, progressPercent, totalBytesDownloaded, totalBytes))
                         }
                     }
                 }
@@ -188,6 +201,11 @@ class ModelDownloadWorker(
             )
         } catch (error: Exception) {
             if (isStopped) {
+                return@withContext Result.retry()
+            }
+
+            val isRetryable = error is java.io.IOException || error is java.net.SocketException
+            if (isRetryable) {
                 return@withContext Result.retry()
             }
 
@@ -238,6 +256,23 @@ class ModelDownloadWorker(
             "%02x".format(byte.toInt() and 0xff)
         }
         return actualHash == expectedHash
+    }
+
+    private fun makeForegroundInfo(
+        modelId: String,
+        progress: Int,
+        bytesDownloaded: Long,
+        totalBytes: Long,
+    ): ForegroundInfo {
+        val notification = DownloadNotificationHelper.buildProgressNotification(
+            applicationContext, modelId, progress, bytesDownloaded, totalBytes,
+        )
+        val notificationId = DownloadNotificationHelper.notificationId(modelId)
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ForegroundInfo(notificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        } else {
+            ForegroundInfo(notificationId, notification)
+        }
     }
 
     private fun errorData(error: DustCoreError): Data {
