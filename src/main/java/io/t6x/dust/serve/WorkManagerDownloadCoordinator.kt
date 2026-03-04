@@ -46,6 +46,7 @@ class WorkManagerDownloadCoordinator(
     private val eventEmitter: (String, Map<String, Any?>) -> Unit,
 ) {
     private val activeWorkIds = ConcurrentHashMap<String, UUID>()
+    private val pendingReconnections = ConcurrentHashMap<String, UUID>()
 
     companion object {
         const val COMMON_TAG = "dust-serve-download"
@@ -217,12 +218,29 @@ class WorkManagerDownloadCoordinator(
                 continue
             }
             activeIds.add(modelId)
-            val descriptor = descriptorProvider(modelId) ?: continue
-            stateStore.setStatus(descriptor.id, ModelStatus.Downloading(0f))
-            observeWork(descriptor = descriptor, workId = workInfo.id)
+            val descriptor = descriptorProvider(modelId)
+            if (descriptor != null) {
+                stateStore.setStatus(descriptor.id, ModelStatus.Downloading(0f))
+                observeWork(descriptor = descriptor, workId = workInfo.id)
+            } else {
+                pendingReconnections[modelId] = workInfo.id
+            }
         }
         return activeIds
     }
+
+    /**
+     * Attaches a pending reconnection for a model that was just registered.
+     * Call this from the plugin's register() path after the descriptor is available.
+     */
+    fun attachReconnectedDownload(descriptor: ModelDescriptor) {
+        val workId = pendingReconnections.remove(descriptor.id) ?: return
+        stateStore.setStatus(descriptor.id, ModelStatus.Downloading(0f))
+        observeWork(descriptor = descriptor, workId = workId)
+    }
+
+    fun hasPendingReconnection(modelId: String): Boolean =
+        pendingReconnections.containsKey(modelId)
 
     private fun failImmediately(
         descriptor: ModelDescriptor,
