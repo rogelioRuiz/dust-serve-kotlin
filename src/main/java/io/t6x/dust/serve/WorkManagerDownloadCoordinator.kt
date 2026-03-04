@@ -157,12 +157,16 @@ class WorkManagerDownloadCoordinator(
 
                     WorkInfo.State.SUCCEEDED -> {
                         activeWorkIds.remove(descriptor.id, workId)
-                        stateStore.setStatus(descriptor.id, ModelStatus.Ready)
+                        val filePath = workInfo.outputData.getString(ModelDownloadWorker.OUTPUT_PATH)
+                        stateStore.updateState(descriptor.id) {
+                            status = ModelStatus.Ready
+                            this.filePath = filePath
+                        }
                         eventEmitter(
                             "modelReady",
                             mapOf(
                                 "modelId" to descriptor.id,
-                                "path" to workInfo.outputData.getString(ModelDownloadWorker.OUTPUT_PATH),
+                                "path" to filePath,
                             ),
                         )
                     }

@@ -223,7 +223,10 @@ class DownloadManager(
             }
         }
 
-        stateStore.setStatus(descriptor.id, ModelStatus.Ready)
+        stateStore.updateState(descriptor.id) {
+            status = ModelStatus.Ready
+            filePath = finalFile.absolutePath
+        }
         eventEmitter(
             "modelReady",
             mapOf("modelId" to descriptor.id, "path" to finalFile.absolutePath),
