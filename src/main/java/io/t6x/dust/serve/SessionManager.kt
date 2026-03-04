@@ -51,7 +51,9 @@ class SessionManager(
      */
     fun setFactory(newFactory: ModelSessionFactory) {
         lock.withLock {
-            check(cachedSessions.isEmpty()) { "Cannot swap factory while sessions are active" }
+            check(factory is StubModelSessionFactory || cachedSessions.isEmpty()) {
+                "Cannot swap factory while sessions are active"
+            }
             factory = newFactory
         }
     }
