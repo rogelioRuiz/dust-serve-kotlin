@@ -21,6 +21,7 @@ import io.t6x.dust.core.DustInputTensor
 import io.t6x.dust.core.DustOutputTensor
 import io.t6x.dust.core.ModelDescriptor
 import io.t6x.dust.core.ModelSession
+import io.t6x.dust.core.ModelSessionFactory
 import io.t6x.dust.core.ModelStatus
 import io.t6x.dust.core.SessionPriority
 import kotlinx.coroutines.CoroutineDispatcher
@@ -36,13 +37,24 @@ enum class MemoryPressureLevel {
 
 class SessionManager(
     private val stateStore: ModelStateStore,
-    private val factory: ModelSessionFactory,
+    private var factory: ModelSessionFactory,
 ) {
 
     internal val inferenceDispatcher = Dispatchers.IO.limitedParallelism(1)
 
     private val lock = ReentrantLock()
     private val cachedSessions = mutableMapOf<String, CachedSession>()
+
+    /**
+     * Swaps the session factory. Must be called before any sessions are loaded
+     * (i.e. while [cachedSessions] is empty).
+     */
+    fun setFactory(newFactory: ModelSessionFactory) {
+        lock.withLock {
+            check(cachedSessions.isEmpty()) { "Cannot swap factory while sessions are active" }
+            factory = newFactory
+        }
+    }
 
     suspend fun loadModel(descriptor: ModelDescriptor, priority: SessionPriority): ModelSession {
         incrementCachedRefCount(descriptor.id)?.let { return it }

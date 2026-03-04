@@ -20,6 +20,7 @@ import io.t6x.dust.core.DustCoreError
 import io.t6x.dust.core.ModelDescriptor
 import io.t6x.dust.core.ModelFormat
 import io.t6x.dust.core.ModelSession
+import io.t6x.dust.core.ModelSessionFactory
 import io.t6x.dust.core.ModelStatus
 import io.t6x.dust.core.SessionPriority
 import kotlinx.coroutines.async
