@@ -30,6 +30,7 @@ import io.t6x.dust.core.ModelStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import org.json.JSONArray
 import java.io.File
 import java.util.Locale
 import java.util.UUID
@@ -53,22 +54,29 @@ class WorkManagerDownloadCoordinator(
     }
 
     fun download(descriptor: ModelDescriptor) {
-        val url = descriptor.url
-        if (url.isNullOrBlank()) {
-            failImmediately(
-                descriptor = descriptor,
-                error = DustCoreError.DownloadFailed("Model descriptor is missing a valid download URL"),
-            )
-            return
-        }
+        val filesManifest = descriptor.metadata?.get("files")
+        val hasManifest = filesManifest != null && try {
+            JSONArray(filesManifest).length() > 0
+        } catch (_: Exception) { false }
 
-        val expectedHash = descriptor.sha256?.lowercase(Locale.US)
-        if (expectedHash.isNullOrBlank()) {
-            failImmediately(
-                descriptor = descriptor,
-                error = DustCoreError.VerificationFailed("Model descriptor is missing a SHA-256 checksum"),
-            )
-            return
+        if (!hasManifest) {
+            val url = descriptor.url
+            if (url.isNullOrBlank()) {
+                failImmediately(
+                    descriptor = descriptor,
+                    error = DustCoreError.DownloadFailed("Model descriptor is missing a valid download URL"),
+                )
+                return
+            }
+
+            val expectedHash = descriptor.sha256?.lowercase(Locale.US)
+            if (expectedHash.isNullOrBlank()) {
+                failImmediately(
+                    descriptor = descriptor,
+                    error = DustCoreError.VerificationFailed("Model descriptor is missing a SHA-256 checksum"),
+                )
+                return
+            }
         }
 
         if (!networkPolicyProvider.isDownloadAllowed()) {
@@ -87,18 +95,30 @@ class WorkManagerDownloadCoordinator(
             .setRequiredNetworkType(if (isWifiOnlyEnabled()) NetworkType.UNMETERED else NetworkType.CONNECTED)
             .build()
 
+        val inputData = if (hasManifest) {
+            // Write manifest to temp file (WorkManager Data has 10KB limit)
+            val manifestFile = File(baseDir, "manifest-${descriptor.id}.json")
+            manifestFile.writeText(filesManifest!!)
+            workDataOf(
+                ModelDownloadWorker.INPUT_MODEL_ID to descriptor.id,
+                ModelDownloadWorker.INPUT_BASE_DIR to baseDir.absolutePath,
+                ModelDownloadWorker.INPUT_SIZE_BYTES to descriptor.sizeBytes,
+                ModelDownloadWorker.INPUT_MANIFEST_PATH to manifestFile.absolutePath,
+            )
+        } else {
+            workDataOf(
+                ModelDownloadWorker.INPUT_MODEL_ID to descriptor.id,
+                ModelDownloadWorker.INPUT_URL to descriptor.url,
+                ModelDownloadWorker.INPUT_EXPECTED_HASH to descriptor.sha256?.lowercase(Locale.US),
+                ModelDownloadWorker.INPUT_BASE_DIR to baseDir.absolutePath,
+                ModelDownloadWorker.INPUT_SIZE_BYTES to descriptor.sizeBytes,
+            )
+        }
+
         val request = OneTimeWorkRequestBuilder<ModelDownloadWorker>()
             .setConstraints(constraints)
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
-            .setInputData(
-                workDataOf(
-                    ModelDownloadWorker.INPUT_MODEL_ID to descriptor.id,
-                    ModelDownloadWorker.INPUT_URL to url,
-                    ModelDownloadWorker.INPUT_EXPECTED_HASH to expectedHash,
-                    ModelDownloadWorker.INPUT_BASE_DIR to baseDir.absolutePath,
-                    ModelDownloadWorker.INPUT_SIZE_BYTES to descriptor.sizeBytes,
-                ),
-            )
+            .setInputData(inputData)
             .addTag(descriptor.id)
             .addTag(COMMON_TAG)
             .build()

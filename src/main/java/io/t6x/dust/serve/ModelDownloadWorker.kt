@@ -27,10 +27,13 @@ import androidx.work.workDataOf
 import io.t6x.dust.core.DustCoreError
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import java.io.File
+import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.MessageDigest
 import java.util.Locale
 
 class ModelDownloadWorker(
@@ -44,6 +47,7 @@ class ModelDownloadWorker(
         const val INPUT_EXPECTED_HASH = "expectedHash"
         const val INPUT_BASE_DIR = "baseDir"
         const val INPUT_SIZE_BYTES = "sizeBytes"
+        const val INPUT_MANIFEST_PATH = "manifestPath"
 
         const val PROGRESS_BYTES_DOWNLOADED = "bytesDownloaded"
         const val PROGRESS_TOTAL_BYTES = "totalBytes"
@@ -58,13 +62,20 @@ class ModelDownloadWorker(
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val modelId = inputData.getString(INPUT_MODEL_ID)
             ?: return@withContext Result.failure(errorData(DustCoreError.DownloadFailed("Missing modelId")))
+        val baseDirPath = inputData.getString(INPUT_BASE_DIR)
+            ?: return@withContext Result.failure(errorData(DustCoreError.DownloadFailed("Missing base directory")))
+        val sizeBytes = inputData.getLong(INPUT_SIZE_BYTES, 0L)
+
+        // Check for manifest-based download
+        val manifestPath = inputData.getString(INPUT_MANIFEST_PATH)
+        if (manifestPath != null) {
+            return@withContext doManifestWork(modelId, baseDirPath, sizeBytes, manifestPath)
+        }
+
         val url = inputData.getString(INPUT_URL)
             ?: return@withContext Result.failure(errorData(DustCoreError.DownloadFailed("Missing URL")))
         val expectedHash = inputData.getString(INPUT_EXPECTED_HASH)?.lowercase(Locale.US)
             ?: return@withContext Result.failure(errorData(DustCoreError.VerificationFailed("Missing SHA-256 checksum")))
-        val baseDirPath = inputData.getString(INPUT_BASE_DIR)
-            ?: return@withContext Result.failure(errorData(DustCoreError.DownloadFailed("Missing base directory")))
-        val sizeBytes = inputData.getLong(INPUT_SIZE_BYTES, 0L)
 
         val modelDir = File(File(baseDirPath, "models"), modelId)
         if (!modelDir.exists() && !modelDir.mkdirs()) {
@@ -214,6 +225,136 @@ class ModelDownloadWorker(
             }
 
             return@withContext Result.failure(
+                errorData(
+                    when (error) {
+                        is DustCoreError -> error
+                        else -> DustCoreError.DownloadFailed(error.message)
+                    },
+                ),
+            )
+        }
+    }
+
+    private suspend fun doManifestWork(
+        modelId: String,
+        baseDirPath: String,
+        totalSizeBytes: Long,
+        manifestPath: String,
+    ): Result {
+        val manifestFile = File(manifestPath)
+        val manifest = try {
+            val array = JSONArray(manifestFile.readText())
+            (0 until array.length()).map { i ->
+                val obj = array.getJSONObject(i)
+                ManifestFileEntry(
+                    filename = obj.getString("filename"),
+                    url = obj.getString("url"),
+                    sha256 = obj.getString("sha256"),
+                    sizeBytes = obj.getLong("sizeBytes"),
+                )
+            }
+        } catch (e: Exception) {
+            return Result.failure(errorData(DustCoreError.DownloadFailed("Invalid manifest: ${e.message}")))
+        } finally {
+            manifestFile.delete()
+        }
+
+        if (manifest.isEmpty()) {
+            return Result.failure(errorData(DustCoreError.DownloadFailed("Empty manifest")))
+        }
+
+        val modelDir = File(File(baseDirPath, "models"), modelId)
+        if (!modelDir.exists() && !modelDir.mkdirs()) {
+            return Result.failure(errorData(DustCoreError.DownloadFailed("Unable to create directory: ${modelDir.absolutePath}")))
+        }
+
+        DownloadNotificationHelper.ensureChannel(applicationContext)
+        setForeground(makeForegroundInfo(modelId, 0, 0L, totalSizeBytes))
+
+        try {
+            var globalBytesDownloaded = 0L
+            val totalSize = maxOf(totalSizeBytes, 1L)
+
+            for (entry in manifest) {
+                if (isStopped) return Result.retry()
+
+                val finalFile = File(modelDir, entry.filename)
+                val partFile = File(modelDir, "${entry.filename}.part")
+
+                // Skip already-downloaded and verified files
+                if (finalFile.exists() && verifyHash(finalFile, entry.sha256.lowercase(Locale.US))) {
+                    globalBytesDownloaded += entry.sizeBytes
+                    val progressPercent = ((globalBytesDownloaded * 100) / totalSize).toInt().coerceIn(0, 100)
+                    setProgress(workDataOf(
+                        PROGRESS_BYTES_DOWNLOADED to globalBytesDownloaded,
+                        PROGRESS_TOTAL_BYTES to totalSizeBytes,
+                    ))
+                    setForeground(makeForegroundInfo(modelId, progressPercent, globalBytesDownloaded, totalSizeBytes))
+                    continue
+                }
+
+                if (finalFile.exists()) finalFile.delete()
+                if (partFile.exists()) partFile.delete()
+
+                var fileBytesDownloaded = 0L
+                val connection = openConnection(url = entry.url, offset = 0L)
+                try {
+                    val statusCode = connection.responseCode
+                    if (statusCode in 500..599) return Result.retry()
+                    if (statusCode !in 200..299) {
+                        return Result.failure(errorData(DustCoreError.DownloadFailed("HTTP $statusCode for ${entry.filename}")))
+                    }
+                    FileOutputStream(partFile).use { output ->
+                        connection.inputStream.buffered().use { input ->
+                            val buffer = ByteArray(BUFFER_SIZE)
+                            while (true) {
+                                if (isStopped) return Result.retry()
+                                val read = input.read(buffer)
+                                if (read < 0) break
+                                output.write(buffer, 0, read)
+                                fileBytesDownloaded += read.toLong()
+
+                                val currentGlobal = globalBytesDownloaded + fileBytesDownloaded
+                                setProgress(workDataOf(
+                                    PROGRESS_BYTES_DOWNLOADED to currentGlobal,
+                                    PROGRESS_TOTAL_BYTES to totalSizeBytes,
+                                ))
+                                val progressPercent = ((currentGlobal * 100) / totalSize).toInt().coerceIn(0, 100)
+                                setForeground(makeForegroundInfo(modelId, progressPercent, currentGlobal, totalSizeBytes))
+                            }
+                        }
+                        output.fd.sync()
+                    }
+                } finally {
+                    connection.disconnect()
+                }
+
+                // Verify file hash
+                if (!verifyHash(partFile, entry.sha256.lowercase(Locale.US))) {
+                    partFile.delete()
+                    return Result.failure(
+                        errorData(DustCoreError.VerificationFailed("SHA-256 mismatch for ${entry.filename}")),
+                    )
+                }
+
+                if (finalFile.exists()) finalFile.delete()
+                if (!partFile.renameTo(finalFile)) {
+                    partFile.copyTo(finalFile, overwrite = true)
+                    partFile.delete()
+                }
+                globalBytesDownloaded += fileBytesDownloaded
+            }
+
+            return Result.success(workDataOf(OUTPUT_PATH to modelDir.absolutePath))
+        } catch (error: Exception) {
+            if (isStopped) return Result.retry()
+            val isRetryable = error is java.io.IOException || error is java.net.SocketException
+            if (isRetryable) return Result.retry()
+
+            // Clean up .part files on failure
+            modelDir.listFiles()?.filter { it.extension == "part" }?.forEach { it.delete() }
+
+            return Result.failure(
                 errorData(
                     when (error) {
                         is DustCoreError -> error
