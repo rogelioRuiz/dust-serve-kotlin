@@ -36,7 +36,7 @@ import java.util.concurrent.ConcurrentHashMap
 data class ManifestFileEntry(
     val filename: String,
     val url: String,
-    val sha256: String,
+    val sha256: String?,
     val sizeBytes: Long,
 )
 
@@ -272,7 +272,7 @@ class DownloadManager(
                 ManifestFileEntry(
                     filename = obj.getString("filename"),
                     url = obj.getString("url"),
-                    sha256 = obj.getString("sha256"),
+                    sha256 = obj.optString("sha256", null),
                     sizeBytes = obj.getLong("sizeBytes"),
                 )
             }
@@ -328,13 +328,22 @@ class DownloadManager(
 
             // Skip already-downloaded and verified files (resume support)
             if (finalFile.exists()) {
-                if (verifyFileHash(finalFile, entry.sha256.lowercase(Locale.US))) {
+                val expectedHash = entry.sha256?.lowercase(Locale.US)
+                if (!expectedHash.isNullOrEmpty()) {
+                    if (verifyFileHash(finalFile, expectedHash)) {
+                        globalBytesDownloaded += entry.sizeBytes
+                        val progress = minOf(globalBytesDownloaded.toFloat() / totalSize.toFloat(), 1f)
+                        stateStore.setStatus(descriptor.id, ModelStatus.Downloading(progress))
+                        continue
+                    }
+                    finalFile.delete()
+                } else {
+                    // No hash to verify — trust existing file
                     globalBytesDownloaded += entry.sizeBytes
                     val progress = minOf(globalBytesDownloaded.toFloat() / totalSize.toFloat(), 1f)
                     stateStore.setStatus(descriptor.id, ModelStatus.Downloading(progress))
                     continue
                 }
-                finalFile.delete()
             }
 
             if (partFile.exists() && !partFile.delete()) {
@@ -375,15 +384,18 @@ class DownloadManager(
                 output.fd.sync()
             }
 
-            // Verify this file's SHA-256
-            stateStore.setStatus(descriptor.id, ModelStatus.Verifying)
-            val actualHash = digest.digest().joinToString(separator = "") { byte ->
-                "%02x".format(byte.toInt() and 0xff)
-            }
-            if (actualHash != entry.sha256.lowercase(Locale.US)) {
-                throw DustCoreError.VerificationFailed(
-                    "File ${entry.filename}: expected ${entry.sha256}, received $actualHash",
-                )
+            // Verify this file's SHA-256 (skip if no hash provided)
+            val expectedHash = entry.sha256?.lowercase(Locale.US)
+            if (!expectedHash.isNullOrEmpty()) {
+                stateStore.setStatus(descriptor.id, ModelStatus.Verifying)
+                val actualHash = digest.digest().joinToString(separator = "") { byte ->
+                    "%02x".format(byte.toInt() and 0xff)
+                }
+                if (actualHash != expectedHash) {
+                    throw DustCoreError.VerificationFailed(
+                        "File ${entry.filename}: expected $expectedHash, received $actualHash",
+                    )
+                }
             }
 
             if (finalFile.exists() && !finalFile.delete()) {

@@ -249,7 +249,7 @@ class ModelDownloadWorker(
                 ManifestFileEntry(
                     filename = obj.getString("filename"),
                     url = obj.getString("url"),
-                    sha256 = obj.getString("sha256"),
+                    sha256 = obj.optString("sha256", null),
                     sizeBytes = obj.getLong("sizeBytes"),
                 )
             }
@@ -282,18 +282,21 @@ class ModelDownloadWorker(
                 val partFile = File(modelDir, "${entry.filename}.part")
 
                 // Skip already-downloaded and verified files
-                if (finalFile.exists() && verifyHash(finalFile, entry.sha256.lowercase(Locale.US))) {
-                    globalBytesDownloaded += entry.sizeBytes
-                    val progressPercent = ((globalBytesDownloaded * 100) / totalSize).toInt().coerceIn(0, 100)
-                    setProgress(workDataOf(
-                        PROGRESS_BYTES_DOWNLOADED to globalBytesDownloaded,
-                        PROGRESS_TOTAL_BYTES to totalSizeBytes,
-                    ))
-                    setForeground(makeForegroundInfo(modelId, progressPercent, globalBytesDownloaded, totalSizeBytes))
-                    continue
+                if (finalFile.exists()) {
+                    val expectedHash = entry.sha256?.lowercase(Locale.US)
+                    val verified = if (!expectedHash.isNullOrEmpty()) verifyHash(finalFile, expectedHash) else true
+                    if (verified) {
+                        globalBytesDownloaded += entry.sizeBytes
+                        val progressPercent = ((globalBytesDownloaded * 100) / totalSize).toInt().coerceIn(0, 100)
+                        setProgress(workDataOf(
+                            PROGRESS_BYTES_DOWNLOADED to globalBytesDownloaded,
+                            PROGRESS_TOTAL_BYTES to totalSizeBytes,
+                        ))
+                        setForeground(makeForegroundInfo(modelId, progressPercent, globalBytesDownloaded, totalSizeBytes))
+                        continue
+                    }
+                    finalFile.delete()
                 }
-
-                if (finalFile.exists()) finalFile.delete()
                 if (partFile.exists()) partFile.delete()
 
                 var fileBytesDownloaded = 0L
@@ -329,12 +332,15 @@ class ModelDownloadWorker(
                     connection.disconnect()
                 }
 
-                // Verify file hash
-                if (!verifyHash(partFile, entry.sha256.lowercase(Locale.US))) {
-                    partFile.delete()
-                    return Result.failure(
-                        errorData(DustCoreError.VerificationFailed("SHA-256 mismatch for ${entry.filename}")),
-                    )
+                // Verify file hash (skip if no hash provided)
+                val expectedHash = entry.sha256?.lowercase(Locale.US)
+                if (!expectedHash.isNullOrEmpty()) {
+                    if (!verifyHash(partFile, expectedHash)) {
+                        partFile.delete()
+                        return Result.failure(
+                            errorData(DustCoreError.VerificationFailed("SHA-256 mismatch for ${entry.filename}")),
+                        )
+                    }
                 }
 
                 if (finalFile.exists()) finalFile.delete()
