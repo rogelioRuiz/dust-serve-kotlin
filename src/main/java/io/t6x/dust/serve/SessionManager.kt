@@ -20,6 +20,7 @@ import io.t6x.dust.core.DustCoreError
 import io.t6x.dust.core.DustInputTensor
 import io.t6x.dust.core.DustOutputTensor
 import io.t6x.dust.core.ModelDescriptor
+import io.t6x.dust.core.ModelFormat
 import io.t6x.dust.core.ModelSession
 import io.t6x.dust.core.ModelSessionFactory
 import io.t6x.dust.core.ModelStatus
@@ -37,25 +38,28 @@ enum class MemoryPressureLevel {
 
 class SessionManager(
     private val stateStore: ModelStateStore,
-    private var factory: ModelSessionFactory,
+    factory: ModelSessionFactory? = null,
 ) {
 
     internal val inferenceDispatcher = Dispatchers.IO.limitedParallelism(1)
 
     private val lock = ReentrantLock()
+    private val factories = mutableMapOf<String, ModelSessionFactory>()
     private val cachedSessions = mutableMapOf<String, CachedSession>()
 
-    /**
-     * Swaps the session factory. Must be called before any sessions are loaded
-     * (i.e. while [cachedSessions] is empty).
-     */
-    fun setFactory(newFactory: ModelSessionFactory) {
+    init {
+        factory?.let(::setFactory)
+    }
+
+    fun setFactory(key: String, factory: ModelSessionFactory) {
         lock.withLock {
-            check(factory is StubModelSessionFactory || cachedSessions.isEmpty()) {
-                "Cannot swap factory while sessions are active"
-            }
-            factory = newFactory
+            factories[key] = factory
         }
+    }
+
+    fun setFactory(factory: ModelSessionFactory) {
+        setFactory(ModelFormat.GGUF.value, factory)
+        setFactory(ModelFormat.ONNX.value, factory)
     }
 
     suspend fun loadModel(descriptor: ModelDescriptor, priority: SessionPriority): ModelSession {
@@ -66,6 +70,7 @@ class SessionManager(
             throw DustCoreError.ModelNotReady
         }
 
+        val factory = resolveFactory(descriptor)
         val createdSession = factory.makeSession(descriptor, priority)
 
         var installedSession: ModelSession? = null
@@ -187,6 +192,13 @@ class SessionManager(
         stateStore.updateState(id) {
             this.refCount = refCount
         }
+    }
+
+    private fun resolveFactory(descriptor: ModelDescriptor): ModelSessionFactory {
+        val taskKey = descriptor.metadata?.get("task")
+        return lock.withLock {
+            taskKey?.let { factories[it] } ?: factories[descriptor.format.value]
+        } ?: throw DustCoreError.FormatUnsupported
     }
 }
 

@@ -203,6 +203,47 @@ class SessionManagerTest {
     }
 
     @Test
+    fun taskFactoryOverridesFormatFactory() = runTest {
+        val stateStore = readyStateStore()
+        val formatFactory = MockModelSessionFactory()
+        val taskFactory = MockModelSessionFactory()
+        val manager = SessionManager(stateStore = stateStore)
+
+        manager.setFactory(ModelFormat.ONNX.value, formatFactory)
+        manager.setFactory("embeddings", taskFactory)
+
+        manager.loadModel(
+            descriptor(
+                format = ModelFormat.ONNX,
+                metadata = mapOf("task" to "embeddings"),
+            ),
+            SessionPriority.INTERACTIVE,
+        )
+
+        assertEquals(0, formatFactory.createCount.get())
+        assertEquals(1, taskFactory.createCount.get())
+    }
+
+    @Test
+    fun formatFactoryFallbackUsedWhenTaskFactoryMissing() = runTest {
+        val stateStore = readyStateStore()
+        val formatFactory = MockModelSessionFactory()
+        val manager = SessionManager(stateStore = stateStore)
+
+        manager.setFactory(ModelFormat.ONNX.value, formatFactory)
+
+        manager.loadModel(
+            descriptor(
+                format = ModelFormat.ONNX,
+                metadata = mapOf("task" to "embeddings"),
+            ),
+            SessionPriority.INTERACTIVE,
+        )
+
+        assertEquals(1, formatFactory.createCount.get())
+    }
+
+    @Test
     fun backgroundZeroRefsEvictedOnStandard() = runTest {
         val stateStore = readyStateStore()
         val factory = MockModelSessionFactory()
@@ -331,13 +372,18 @@ class SessionManagerTest {
         }
     }
 
-    private fun descriptor(id: String = "model-a"): ModelDescriptor {
+    private fun descriptor(
+        id: String = "model-a",
+        format: ModelFormat = ModelFormat.GGUF,
+        metadata: Map<String, String>? = null,
+    ): ModelDescriptor {
         return ModelDescriptor(
             id = id,
             name = "Model A",
-            format = ModelFormat.GGUF,
+            format = format,
             sizeBytes = 1_024L,
             version = "1.0.0",
+            metadata = metadata,
         )
     }
 }

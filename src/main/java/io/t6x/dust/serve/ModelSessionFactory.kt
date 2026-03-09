@@ -19,18 +19,8 @@ package io.t6x.dust.serve
 import io.t6x.dust.core.DustCoreError
 import io.t6x.dust.core.DustInputTensor
 import io.t6x.dust.core.DustOutputTensor
-import io.t6x.dust.core.ModelDescriptor
-import io.t6x.dust.core.ModelSession
-import io.t6x.dust.core.ModelSessionFactory
-import io.t6x.dust.core.SessionPriority
 
 // ModelSessionFactory interface is defined in dust-core.
-
-class StubModelSessionFactory : ModelSessionFactory {
-    override suspend fun makeSession(descriptor: ModelDescriptor, priority: SessionPriority): ModelSession {
-        throw DustCoreError.FormatUnsupported
-    }
-}
 
 class StubProbeInferenceEngine : ProbeInferenceEngine {
     override suspend fun runInference(
